@@ -1,19 +1,16 @@
 # -------------------------------------------------------
-# Visualisation 3D/2D du volume interpolé + points d'observation
-# - Vue 3D : isosurfaces via marching_cubes (si dispo) OU fallback scatter
-# - Vue 2D : coupe Z avec slider, upsample + gaussian blur (optionnel)
-# - Tooltips 2D avec mplcursors (si dispo), clic 3D → label
-# - Patchs perf : downsample "fast", step_size marching_cubes, décimation trimesh
-# - Compat NumPy 2.x : np.ptp(...) au lieu de ndarray.ptp()
+# Visualisation 3D/2D du volume interpolé + points d'observation + maillage .OBJ
 # -------------------------------------------------------
 from __future__ import annotations
 import warnings
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Slider
-from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+from matplotlib.collections import LineCollection
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection, Line3DCollection
+from scipy.ndimage import gaussian_filter, zoom
 
-# Optionnels (recommandés)
+# Optionnels
 try:
     from skimage.measure import marching_cubes
     _HAS_SKIMAGE = True
@@ -21,372 +18,298 @@ except Exception:
     _HAS_SKIMAGE = False
 
 try:
-    import mplcursors  # noqa: F401
+    import mplcursors
     _HAS_MPLCURSORS = True
 except Exception:
     _HAS_MPLCURSORS = False
 
-from scipy.ndimage import gaussian_filter, zoom
+try:
+    import trimesh
+    _HAS_TRIMESH = True
+except Exception:
+    _HAS_TRIMESH = False
 
 
 # ---------- Helpers ----------------------------------------------------------
 
-def _ensure_xyz_order(xs: np.ndarray, ys: np.ndarray, zs: np.ndarray, vol: np.ndarray):
-    """
-    S'assure que 'vol' est de shape (len(xs), len(ys), len(zs)).
-    Si le volume est (len(zs), len(ys), len(xs)), on le transpose.
-    """
+def _ensure_xyz_order(xs, ys, zs, vol):
+    """S’assure que le volume est (nx,ny,nz)."""
     sx, sy, sz = len(xs), len(ys), len(zs)
     if vol.shape == (sx, sy, sz):
         return vol
     if vol.shape == (sz, sy, sx):
         return np.transpose(vol, (2, 1, 0))
-    raise ValueError(
-        f"Shape du volume {vol.shape} incompatible avec axes "
-        f"({sx}, {sy}, {sz}) (X,Y,Z) ou ({sz}, {sy}, {sx}) (Z,Y,X)."
-    )
+    raise ValueError(f"Shape {vol.shape} inattendue.")
 
 
-def _slice_Z(volume_xyz: np.ndarray, k: int):
-    """Retourne la coupe 2D (X,Y) au niveau d'index Z=k."""
-    # transpose pour imshow avec extent (x_min, x_max, y_min, y_max)
-    return volume_xyz[:, :, k].T
+def _slice_Z(vol, k): return vol[:, :, k].T
 
 
-def _compute_isolevels(volume_xyz: np.ndarray, n_isos: int, vmin: float | None, vmax: float | None):
-    """
-    Calcule des isovaleurs soit par percentiles (si vmin/vmax None),
-    soit réparties linéairement entre vmin/vmax.
-    """
-    vv = volume_xyz[np.isfinite(volume_xyz)]
-    if vmin is None:
-        vmin = float(np.percentile(vv, 10))
-    if vmax is None:
-        vmax = float(np.percentile(vv, 90))
-    levels = np.linspace(vmin, vmax, n_isos + 2)[1:-1]  # on évite les extrêmes exacts
+def _compute_isolevels(vol, n_isos, vmin, vmax):
+    vv = vol[np.isfinite(vol)]
+    if vmin is None: vmin = float(np.percentile(vv, 10))
+    if vmax is None: vmax = float(np.percentile(vv, 90))
+    levels = np.linspace(vmin, vmax, n_isos + 2)[1:-1]
     return levels, vmin, vmax
 
 
-def _plot_isosurface(
-    ax3d,
-    xs: np.ndarray,
-    ys: np.ndarray,
-    zs: np.ndarray,
-    volume_xyz: np.ndarray,
-    level: float,
-    face_alpha: float = 0.25,
-    cmap: str = "viridis",
-    mc_step: int = 2,
-    decimate_max_faces: int | None = 60000,
-    fallback_scatter_step: int = 3,
-):
-    """
-    Trace une isosurface via marching_cubes (si dispo). Sinon, fallback en scatter 3D
-    des voxels proches du niveau (avec sous-échantillonnage).
-    - mc_step : pas d'échantillonnage marching_cubes (2 ou 3 -> beaucoup plus rapide)
-    - decimate_max_faces : si trimesh dispo, essaie de réduire à ~ce nombre de faces
-    - fallback_scatter_step : stride pour sous-échantillonner les voxels en fallback
-    """
-    # Normalisation couleur pour cet iso
-    denom = np.ptp(volume_xyz) + 1e-12
-    iso_color = plt.get_cmap(cmap)((level - np.nanmin(volume_xyz)) / denom)
-
+def _plot_isosurface(ax3d, xs, ys, zs, V, level, face_alpha=0.25,
+                     cmap="viridis", mc_step=2, decimate_max_faces=60000,
+                     fallback_scatter_step=3):
+    denom = np.ptp(V) + 1e-12
+    iso_color = plt.get_cmap(cmap)((level - np.nanmin(V)) / denom)
     if _HAS_SKIMAGE:
-        # marching_cubes attend (Z,Y,X) et spacing (dz,dy,dx)
-        vol_zyx = np.transpose(volume_xyz, (2, 1, 0))
-        dz = float(zs[1] - zs[0]) if len(zs) > 1 else 1.0
-        dy = float(ys[1] - ys[0]) if len(ys) > 1 else 1.0
-        dx = float(xs[1] - xs[0]) if len(xs) > 1 else 1.0
-        verts, faces, _, _ = marching_cubes(
-            vol_zyx, level=level, spacing=(dz, dy, dx),
-            step_size=int(max(1, mc_step))
-        )
-        # coords en (z,y,x) -> (x,y,z)
-        verts_xyz = np.stack([verts[:, 2] + xs[0], verts[:, 1] + ys[0], verts[:, 0] + zs[0]], axis=1)
-
-        # Décimation (si trimesh dispo)
-        if decimate_max_faces is not None:
+        vol_zyx = np.transpose(V, (2, 1, 0))
+        dz, dy, dx = np.ptp(zs)/len(zs), np.ptp(ys)/len(ys), np.ptp(xs)/len(xs)
+        verts, faces, _, _ = marching_cubes(vol_zyx, level=level,
+                                            spacing=(dz, dy, dx),
+                                            step_size=int(max(1, mc_step)))
+        verts_xyz = np.stack([verts[:, 2]+xs[0], verts[:, 1]+ys[0], verts[:, 0]+zs[0]], 1)
+        if decimate_max_faces and _HAS_TRIMESH:
             try:
-                import trimesh
-                mesh_tri = trimesh.Trimesh(vertices=verts_xyz, faces=faces, process=False)
-                if len(mesh_tri.faces) > decimate_max_faces:
-                    mesh_tri = mesh_tri.simplify_quadratic_decimation(decimate_max_faces)
-                faces = mesh_tri.faces
-                verts_xyz = mesh_tri.vertices
+                m = trimesh.Trimesh(vertices=verts_xyz, faces=faces, process=False)
+                if len(m.faces) > decimate_max_faces:
+                    m = m.simplify_quadratic_decimation(decimate_max_faces)
+                verts_xyz, faces = m.vertices, m.faces
             except Exception:
-                # pas de décimation possible -> on garde tel quel
                 pass
-
-        mesh = Poly3DCollection(verts_xyz[faces], alpha=face_alpha, linewidths=0, antialiased=False)
-        mesh.set_edgecolor("none")
+        mesh = Poly3DCollection(verts_xyz[faces], alpha=face_alpha, linewidths=0)
         mesh.set_facecolor(iso_color)
+        mesh.set_edgecolor("none")
         ax3d.add_collection3d(mesh)
-
     else:
-        # Fallback : scatter des voxels "proches" du niveau, sous-échantillonné
-        tol = (np.nanmax(volume_xyz) - np.nanmin(volume_xyz)) * 0.02
-        mask = np.isfinite(volume_xyz) & (np.abs(volume_xyz - level) < tol)
-        if not np.any(mask):
-            return
-        # Sous-échantillonnage fort pour fluidité
-        mask_ds = np.zeros_like(mask)
-        mask_ds[::fallback_scatter_step, ::fallback_scatter_step, ::fallback_scatter_step] = \
-            mask[::fallback_scatter_step, ::fallback_scatter_step, ::fallback_scatter_step]
-        if not np.any(mask_ds):
-            return
+        tol = (np.nanmax(V)-np.nanmin(V))*0.02
+        mask = np.isfinite(V) & (np.abs(V - level) < tol)
+        mask[::fallback_scatter_step, ::fallback_scatter_step, ::fallback_scatter_step] &= True
         xs3d, ys3d, zs3d = np.meshgrid(xs, ys, zs, indexing="xy")
-        X = xs3d[mask_ds]; Y = ys3d[mask_ds]; Z = zs3d[mask_ds]
+        X, Y, Z = xs3d[mask], ys3d[mask], zs3d[mask]
         ax3d.scatter(X, Y, Z, s=1, alpha=0.15, c=[iso_color])
 
 
-def _scatter_points_3d(ax3d, df_points, neon_color="#00FFFF", s=14, halo=1.8):
-    """
-    Affiche les points d'observation en 3D avec halo noir + couleur néon.
-    df_points: pandas DataFrame avec col. X,Y,Z,R (R optionnelle pour labels)
-    """
-    x = df_points["X"].values
-    y = df_points["Y"].values
-    z = df_points["Z"].values
+def _scatter_points_3d(ax, df, neon="#00FFFF"):
+    x, y, z = df["X"], df["Y"], df["Z"]
+    ax.scatter(x, y, z, s=24, c="k", alpha=1.0, depthshade=False, zorder=5)
+    pts = ax.scatter(x, y, z, s=14, c=neon, alpha=1.0, depthshade=False, zorder=6)
 
-    # Halo noir
-    ax3d.scatter(x, y, z, s=s * halo, c="k", alpha=1.0, depthshade=False, zorder=5)
-    # Couleur néon (cyan par défaut)
-    pts = ax3d.scatter(x, y, z, s=s, c=neon_color, alpha=1.0, depthshade=False, zorder=6)
-
-    # Click → label
     def _on_pick(event):
-        ind = event.ind[0]
-        if "R" in df_points.columns:
-            label = f"R={df_points['R'].values[ind]:.3g} @ ({x[ind]:.2f}, {y[ind]:.2f}, {z[ind]:.2f})"
-        else:
-            label = f"({x[ind]:.2f}, {y[ind]:.2f}, {z[ind]:.2f})"
-        ax3d.text(
-            x[ind], y[ind], z[ind], label, color="w",
-            bbox=dict(boxstyle="round,pad=0.2", fc="k", ec="none", alpha=0.65)
-        )
-        ax3d.figure.canvas.draw_idle()
+        i = event.ind[0]
+        rtxt = f"R={df['R'].values[i]:.3g} " if "R" in df.columns else ""
+        label = f"{rtxt}({x[i]:.2f},{y[i]:.2f},{z[i]:.2f})"
+        ax.text(x[i], y[i], z[i], label, color="w",
+                bbox=dict(fc="k", ec="none", alpha=0.6))
+        ax.figure.canvas.draw_idle()
 
     pts.set_picker(True)
-    ax3d.figure.canvas.mpl_connect("pick_event", _on_pick)
+    ax.figure.canvas.mpl_connect("pick_event", _on_pick)
     return pts
 
 
-def _scatter_points_2d(ax2d, df_points, neon_color="#00FFFF", s=30, halo=2.2):
-    """
-    Affiche les points sur la coupe 2D (X,Y) avec halo + tooltips si mplcursors dispo.
-    """
-    x = df_points["X"].values
-    y = df_points["Y"].values
-
-    ax2d.scatter(x, y, s=s * halo, c="k", alpha=1.0, zorder=5)
-    sc = ax2d.scatter(x, y, s=s, c=neon_color, alpha=1.0, zorder=6)
-
+def _scatter_points_2d(ax, df, neon="#00FFFF"):
+    x, y = df["X"], df["Y"]
+    ax.scatter(x, y, s=60, c="k", alpha=1.0, zorder=5)
+    sc = ax.scatter(x, y, s=30, c=neon, alpha=1.0, zorder=6)
     if _HAS_MPLCURSORS:
-        import mplcursors
         cursor = mplcursors.cursor(sc, hover=True)
-
         @cursor.connect("add")
         def _(sel):
-            # --- récupération robuste de l'index ---
-            i = getattr(sel, "index", None)  # préférence : sel.index (mplcursors >= 0.5)
+            i = getattr(sel, "index", None)
             if i is None:
-                # Fallback : nearest-neighbour sur les offsets (compatible MaskedArray)
                 xy = sc.get_offsets()
-                # sel.target est (x, y) dans les données
-                dx = xy[:, 0] - sel.target[0]
-                dy = xy[:, 1] - sel.target[1]
-                i = int(np.argmin(dx * dx + dy * dy))
-            # ---------------------------------------
-
-            if "R" in df_points.columns:
-                sel.annotation.set_text(
-                    f"R={df_points['R'].values[i]:.3g}\nX={x[i]:.2f}\nY={y[i]:.2f}"
-                )
-            else:
-                sel.annotation.set_text(f"X={x[i]:.2f}\nY={y[i]:.2f}")
-            sel.annotation.get_bbox_patch().set(
-                fc="k", ec="none", alpha=0.75, boxstyle="round,pad=0.2"
-            )
-
+                d = np.sum((xy - sel.target)**2, 1)
+                i = int(np.argmin(d))
+            rtxt = f"R={df['R'].values[i]:.3g}\n" if "R" in df.columns else ""
+            sel.annotation.set_text(f"{rtxt}X={x[i]:.2f}\nY={y[i]:.2f}")
+            sel.annotation.get_bbox_patch().set(fc="k", ec="none", alpha=0.75)
     return sc
 
 
-# ---------- API principale ---------------------------------------------------
+# ---------- Mesh helpers -----------------------------------------------------
+
+def _load_mesh(path):
+    m = trimesh.load_mesh(str(path), process=False)
+    if isinstance(m, trimesh.Scene):
+        m = trimesh.util.concatenate(tuple(m.dump().values()))
+    return m
+
+
+def _mesh_edges_segments3d(mesh, max_edges=80000):
+    F = np.asarray(mesh.faces, dtype=int)
+    V = np.asarray(mesh.vertices, dtype=float)
+    if F.size == 0:
+        return np.empty((0, 2, 3), float)
+
+    # Edges uniques
+    E = np.vstack([F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]])
+    E.sort(axis=1)
+    E = np.unique(E, axis=0)
+
+    # Sous-échantillonnage si trop d'arêtes
+    if len(E) > max_edges:
+        # ➜ indices ENTIERs (pas float); pas d'ambiguïté sur les args de linspace
+        idx = np.linspace(0, len(E) - 1, num=max_edges, endpoint=True, dtype=int)
+        # sécurité: enlever doublons potentiels
+        idx = np.unique(idx)
+        E = E[idx]
+
+    segs = np.stack([V[E[:, 0]], V[E[:, 1]]], axis=1)  # (n,2,3)
+    return segs
+
+def _mesh_section_segments_xy(mesh, z_value):
+    sec3d = mesh.section(plane_origin=[0,0,float(z_value)], plane_normal=[0,0,1])
+    if sec3d is None: return []
+    path2d, _ = sec3d.to_planar()
+    segs = []
+    try:
+        for P in path2d.discrete:
+            P = np.asarray(P,float)
+            if len(P)>=2: segs.append(P[:,:2])
+    except Exception:
+        V = np.asarray(path2d.vertices,float)
+        for e in path2d.entities:
+            if hasattr(e,"points"):
+                idx = np.asarray(e.points,int); segs.append(V[idx])
+    return segs
+
+
+def _union_axes_limits(ax, xs, ys, zs, mesh=None):
+    xmin,xmax=np.min(xs),np.max(xs)
+    ymin,ymax=np.min(ys),np.max(ys)
+    zmin,zmax=np.min(zs),np.max(zs)
+    if mesh is not None:
+        V=np.asarray(mesh.vertices,float)
+        xmin=min(xmin,V[:,0].min()); xmax=max(xmax,V[:,0].max())
+        ymin=min(ymin,V[:,1].min()); ymax=max(ymax,V[:,1].max())
+        zmin=min(zmin,V[:,2].min()); zmax=max(zmax,V[:,2].max())
+    ax.set_xlim(xmin,xmax); ax.set_ylim(ymin,ymax); ax.set_zlim(zmin,zmax)
+
+
+def _warn_if_far(ax, xs, ys, zs, mesh):
+    gv=np.array([np.mean(xs),np.mean(ys),np.mean(zs)])
+    mv=np.mean(mesh.vertices,0)
+    d=np.linalg.norm(gv-mv)
+    scale=max(np.ptp(xs),np.ptp(ys),np.ptp(zs))
+    if d>0.1*scale:
+        ax.text2D(0.02,0.98,f"⚠ Mesh/volume décalés (Δ≈{d:.2f})",
+                  transform=ax.transAxes,color="red",
+                  bbox=dict(fc="w",ec="none",alpha=0.8))
+
+def _mesh_edges_segments3d(mesh, max_edges=80000):
+    F = np.asarray(mesh.faces, dtype=int)
+    V = np.asarray(mesh.vertices, dtype=float)
+    if F.size == 0:
+        return np.empty((0, 2, 3), float)
+
+    # Arêtes uniques
+    E = np.vstack([F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]])
+    E.sort(axis=1)
+    E = np.unique(E, axis=0)
+
+    # Sous-échantillonnage si trop d'arêtes
+    if len(E) > max_edges:
+        idx = np.linspace(0, len(E) - 1, num=max_edges, endpoint=True, dtype=int)
+        idx = np.unique(idx)  # sécurité
+        E = E[idx]
+
+    segs = np.stack([V[E[:, 0]], V[E[:, 1]]], axis=1)  # (n,2,3)
+    return segs
+
+
+def _add_mesh_wire3d(ax3d, mesh, color="#aaaaaa", alpha=0.8, lw=0.5, max_edges=80000):
+    """
+    Ajoute un wireframe léger sous forme de Line3DCollection.
+    Requiert: from mpl_toolkits.mplot3d.art3d import Line3DCollection
+    """
+    segs = _mesh_edges_segments3d(mesh, max_edges=max_edges)
+    if segs.size == 0:
+        return None
+    coll = Line3DCollection(segs, colors=color, linewidths=lw, alpha=alpha)
+    ax3d.add_collection3d(coll)
+    return coll
+
+
+
+# ---------- Main viewer ------------------------------------------------------
 
 def show_volume_and_points(
-    xs: np.ndarray,
-    ys: np.ndarray,
-    zs: np.ndarray,
-    volume: np.ndarray,
-    points_df=None,
-    n_isosurfaces: int = 3,
-    vmin: float | None = None,
-    vmax: float | None = None,
-    cmap: str = "viridis",
-    initial_k: int | None = None,
-    upsample_factor: float = 2.0,
-    gaussian_sigma: float = 0.8,
-    title: str = "Radioactivity — 3D isosurfaces & Z-slice",
-    # nouveaux paramètres perf :
-    fast: bool = True,
-    downsample_factor: float = 0.5,
-    mc_step: int = 2,
-    decimate_max_faces: int | None = 60000,
-    fallback_scatter_step: int = 3,
+    xs, ys, zs, volume, points_df=None,
+    n_isosurfaces=3, vmin=None, vmax=None, cmap="viridis",
+    fast=True, downsample_factor=0.5,
+    mc_step=2, decimate_max_faces=60000, fallback_scatter_step=3,
+    obj_path=None, mesh_mode="wire", mesh_color="#a0a0a0",
+    mesh_alpha=0.9, mesh_lw=0.5, mesh_max_edges=80000,
+    show_isosurfaces=True, show_section_2d=True, title="Volume & Points"
 ):
-    """
-    Affiche une fenêtre avec :
-      - à gauche : vue 3D isosurfaces + points
-      - à droite : coupe 2D en Z avec slider pour changer la tranche
+    """Affichage interactif 3D+2D avec maillage .obj léger."""
+    V=_ensure_xyz_order(xs,ys,zs,volume)
+    if fast and downsample_factor!=1.0:
+        V=zoom(V,downsample_factor,order=1)
+        xs=np.linspace(xs.min(),xs.max(),V.shape[0])
+        ys=np.linspace(ys.min(),ys.max(),V.shape[1])
+        zs=np.linspace(zs.min(),zs.max(),V.shape[2])
+    nx,ny,nz=V.shape
+    levels,vmin,vmax=_compute_isolevels(V,n_isosurfaces,vmin,vmax)
 
-    Paramètres clés pour la fluidité :
-      fast=True, downsample_factor=0.5 → downsample du volume pour l'affichage
-      mc_step=2 → moins de triangles aux isosurfaces
-      decimate_max_faces=60000 → tente une décimation via trimesh
-      fallback_scatter_step=3 → sous-échantillonne le scatter fallback
-    """
-    # Harmonise l'ordre (X,Y,Z)
-    V = _ensure_xyz_order(xs, ys, zs, volume)
+    fig=plt.figure(figsize=(13,6)); fig.suptitle(title)
+    ax3d=fig.add_subplot(1,2,1,projection="3d")
+    ax2d=fig.add_subplot(1,2,2)
 
-    # Downsample "affichage"
-    if fast and downsample_factor != 1.0:
-        V = zoom(V, downsample_factor, order=1)  # bilinear 3D
-        xs = np.linspace(xs.min(), xs.max(), V.shape[0])
-        ys = np.linspace(ys.min(), ys.max(), V.shape[1])
-        zs = np.linspace(zs.min(), zs.max(), V.shape[2])
+    mesh=None
+    if obj_path and _HAS_TRIMESH:
+        try:
+            mesh=_load_mesh(obj_path)
+        except Exception as e:
+            print(f"[WARN] OBJ non chargé: {e}")
 
-    nx, ny, nz = V.shape
+    # --- 3D
+    if show_isosurfaces and mesh is None:
+        for lv in levels:
+            _plot_isosurface(ax3d,xs,ys,zs,V,lv,0.25,cmap,mc_step,decimate_max_faces,fallback_scatter_step)
+    if mesh is not None:
+        if mesh_mode=="wire":
+            _add_mesh_wire3d(ax3d,mesh,color=mesh_color,alpha=mesh_alpha,lw=mesh_lw,max_edges=mesh_max_edges)
+        else:
+            Vt=np.asarray(mesh.vertices); F=np.asarray(mesh.faces,int)
+            coll=Poly3DCollection(Vt[F],alpha=0.15,facecolor=mesh_color,edgecolor="none")
+            ax3d.add_collection3d(coll)
+        _union_axes_limits(ax3d,xs,ys,zs,mesh)
+        _warn_if_far(ax3d,xs,ys,zs,mesh)
+    else:
+        _union_axes_limits(ax3d,xs,ys,zs)
+    if points_df is not None: _scatter_points_3d(ax3d,points_df)
+    ax3d.set_xlabel("X"); ax3d.set_ylabel("Y"); ax3d.set_zlabel("Z")
 
-    # Isovaleurs
-    levels, used_vmin, used_vmax = _compute_isolevels(V, n_isosurfaces, vmin, vmax)
+    # --- 2D
+    k0=nz//2
+    sl=_slice_Z(V,k0)
+    sl=zoom(sl,2.0,order=1); sl=gaussian_filter(sl,0.8)
+    im=ax2d.imshow(sl,origin="lower", extent=(xs.min(),xs.max(),ys.min(),ys.max()), vmin=vmin,vmax=vmax,cmap=cmap)
+    plt.colorbar(im,ax=ax2d, fraction=0.046, pad=0.04).set_label("Radioactivity (cpm)")
+    if points_df is not None: _scatter_points_2d(ax2d,points_df)
+    ax2d.set_title(f"Coupe Z @ {zs[k0]:.2f}"); ax2d.set_xlabel("X"); ax2d.set_ylabel("Y")
 
-    # Figure : 2 colonnes + slider
-    fig = plt.figure(figsize=(14, 6))
-    fig.suptitle(title, fontsize=14)
+    sec=None
+    if mesh is not None and show_section_2d:
+        segs=_mesh_section_segments_xy(mesh,zs[k0])
+        if segs:
+            sec=LineCollection(segs,colors="w",lw=1.5,alpha=0.9)
+            ax2d.add_collection(sec)
 
-    ax3d = fig.add_subplot(1, 2, 1, projection="3d")
-    ax2d = fig.add_subplot(1, 2, 2)
-
-    # ---- Vue 3D : isosurfaces
-    for lv in levels:
-        _plot_isosurface(
-            ax3d, xs, ys, zs, V, level=lv, face_alpha=0.25, cmap=cmap,
-            mc_step=mc_step, decimate_max_faces=decimate_max_faces,
-            fallback_scatter_step=fallback_scatter_step
-        )
-
-    # Points 3D
-    if points_df is not None and len(points_df) > 0:
-        _scatter_points_3d(ax3d, points_df, neon_color="#00FFFF")
-
-    ax3d.set_xlabel("X")
-    ax3d.set_ylabel("Y")
-    ax3d.set_zlabel("Z")
-    ax3d.set_title(f"Isosurfaces ({len(levels)} niveaux)\n[{used_vmin:.3g} .. {used_vmax:.3g}]")
-    ax3d.view_init(elev=25, azim=-65)
-    ax3d.set_xlim(xs.min(), xs.max())
-    ax3d.set_ylim(ys.min(), ys.max())
-    ax3d.set_zlim(zs.min(), zs.max())
-
-    # ---- Vue 2D : coupe Z
-    if initial_k is None:
-        initial_k = nz // 2
-    img2d = _slice_Z(V, initial_k)
-
-    # Upsample + blur
-    if upsample_factor and upsample_factor != 1.0:
-        img2d = zoom(img2d, upsample_factor, order=1)  # bilinear
-    if gaussian_sigma and gaussian_sigma > 0:
-        img2d = gaussian_filter(img2d, sigma=gaussian_sigma)
-
-    im = ax2d.imshow(
-        img2d,
-        origin="lower",
-        extent=(xs.min(), xs.max(), ys.min(), ys.max()),
-        vmin=used_vmin if vmin is None else vmin,
-        vmax=used_vmax if vmax is None else vmax,
-        cmap=cmap,
-        aspect="equal",
-    )
-    cbar = plt.colorbar(im, ax=ax2d, fraction=0.046, pad=0.04)
-    cbar.set_label("Radioactivity (cpm)")
-
-    # Points 2D
-    if points_df is not None and len(points_df) > 0:
-        _scatter_points_2d(ax2d, points_df, neon_color="#00FFFF")
-
-    ax2d.set_title(f"Coupe Z @ index {initial_k} (Z={zs[initial_k]:.2f})")
-    ax2d.set_xlabel("X")
-    ax2d.set_ylabel("Y")
-
-    # ---- Slider pour changer k
-    ax_slider = plt.axes([0.56, 0.08, 0.35, 0.03])
-    slider = Slider(ax_slider, "Z index", 0, nz - 1, valinit=initial_k, valfmt="%0.0f")
-
-    def _update(val):
-        k = int(slider.val)
-        sl = _slice_Z(V, k)
-        if upsample_factor and upsample_factor != 1.0:
-            sl = zoom(sl, upsample_factor, order=1)
-        if gaussian_sigma and gaussian_sigma > 0:
-            sl = gaussian_filter(sl, sigma=gaussian_sigma)
-        im.set_data(sl)
-        ax2d.set_title(f"Coupe Z @ index {k} (Z={zs[k]:.2f})")
+    # --- slider
+    axsl=plt.axes([0.56,0.08,0.35,0.03])
+    slz=Slider(axsl,"Z index",0,nz-1,valinit=k0,valfmt="%0.0f")
+    def _upd(val):
+        k=int(slz.val)
+        img=_slice_Z(V,k)
+        img=zoom(img,2.0,order=1); img=gaussian_filter(img,0.8)
+        im.set_data(img)
+        ax2d.set_title(f"Coupe Z @ {zs[k]:.2f}")
+        if mesh is not None and show_section_2d:
+            segs=_mesh_section_segments_xy(mesh,zs[k])
+            if sec: sec.set_segments(segs)
         fig.canvas.draw_idle()
-
-    slider.on_changed(_update)
+    slz.on_changed(_upd)
 
     with warnings.catch_warnings():
-        warnings.simplefilter("ignore", UserWarning)
-        plt.tight_layout(rect=[0, 0.05, 1, 0.97])
-    plt.show()
-
-
-# ---------- Diagnostics validation ------------------------------------------
-
-def plot_crossval_diagnostics(
-    obs: np.ndarray, pred: np.ndarray, var: np.ndarray | None = None,
-    title: str = "Cross-validation diagnostics"
-):
-    """
-    Graphiques : Pred vs Obs, résidus vs préd, et histogramme des résidus standardisés si 'var' est fourni.
-    """
-    from scipy.stats import norm
-
-    obs = np.asarray(obs, dtype=float)
-    pred = np.asarray(pred, dtype=float)
-    resid = obs - pred
-
-    fig, axes = plt.subplots(1, 3 if var is not None else 2, figsize=(14, 4))
-    axes = np.atleast_1d(axes)
-
-    # 1) Pred vs Obs
-    ax = axes[0]
-    ax.scatter(obs, pred, s=20, alpha=0.7)
-    mn, mx = np.nanmin([obs, pred]), np.nanmax([obs, pred])
-    ax.plot([mn, mx], [mn, mx], "k--", lw=1)
-    ax.set_xlabel("Observed")
-    ax.set_ylabel("Predicted")
-    ax.set_title("Predicted vs Observed")
-
-    # 2) Résidus
-    ax = axes[1]
-    ax.scatter(pred, resid, s=20, alpha=0.7)
-    ax.axhline(0, color="k", lw=1, ls="--")
-    ax.set_xlabel("Predicted")
-    ax.set_ylabel("Residual (obs - pred)")
-    ax.set_title("Residuals")
-
-    # 3) Résidus standardisés
-    if var is not None and len(axes) > 2:
-        ax = axes[2]
-        z = resid / np.sqrt(np.maximum(var, 1e-12))
-        ax.hist(z, bins=24, density=True, alpha=0.7)
-        xs = np.linspace(-4, 4, 200)
-        ax.plot(xs, norm.pdf(xs), "k--", lw=1, label="N(0,1)")
-        ax.set_title("Standardized residuals")
-        ax.legend()
-
-    fig.suptitle(title)
-    plt.tight_layout()
+        warnings.simplefilter("ignore",UserWarning)
+        plt.tight_layout(rect=[0,0.05,1,0.97])
     plt.show()

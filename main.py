@@ -121,10 +121,16 @@ def cmd_view(args: argparse.Namespace) -> None:
         xs, ys, zs, est,
         points_df=df,
         n_isosurfaces=args.nisos,
-        vmin=args.vmin,
-        vmax=args.vmax,
+        vmin=args.vmin, vmax=args.vmax,
         cmap=args.cmap,
-        title="GeoRad3D — Volume & Points"
+        title="Volume & Points",
+        obj_path=args.obj,
+        mesh_mode=args.mesh_mode,
+        mesh_color="#9aa0a6",
+        mesh_alpha=0.9,
+        mesh_lw=0.6,
+        mesh_max_edges=args.mesh_max_edges,
+        show_isosurfaces=not args.no_isos,
     )
 
 
@@ -205,6 +211,10 @@ def build_parser() -> argparse.ArgumentParser:
     pv.add_argument("--vmin", type=float, default=None, help="Borne basse des couleurs")
     pv.add_argument("--vmax", type=float, default=None, help="Borne haute des couleurs")
     pv.add_argument("--cmap", default="viridis")
+    pv.add_argument("--obj", default=None, help="Maillage .obj à superposer")
+    pv.add_argument("--no-isos", action="store_true", help="Désactiver les isosurfaces (recommandé avec .obj)")
+    pv.add_argument("--mesh-mode", default="wire", choices=["wire","surface"], help="Affichage du mesh")
+    pv.add_argument("--mesh-max-edges", type=int, default=80000, help="Max edges wireframe")
     pv.set_defaults(func=cmd_view)
 
     # paint

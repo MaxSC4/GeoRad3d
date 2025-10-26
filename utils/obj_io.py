@@ -149,3 +149,144 @@ class SimpleOBJ:
                     f.write("f " + " ".join(f"{vi+1}/{ti+1}" for vi, ti in zip(fv, fvt)) + "\n")
                 else:
                     f.write("f " + " ".join(f"{vi+1}" for vi in fv) + "\n")
+
+    def save(self, path_out: str | Path) -> None:
+        """
+        Écrit un OBJ "classique" (sans couleurs par sommet).
+        On préserve mtllib/usemtl, les UV (vt) et les indices de faces (v/vt).
+        """
+        path_out = Path(path_out)
+        with path_out.open("w", encoding="utf-8") as f:
+            if self.mtllib:
+                f.write(f"mtllib {self.mtllib}\n")
+            if self.usemtl:
+                f.write(f"usemtl {self.usemtl}\n")
+
+            for x, y, z in np.asarray(self.vertices, dtype=float):
+                f.write(f"v {x:.6f} {y:.6f} {z:.6f}\n")
+
+            for uv in np.asarray(self.uvs, dtype=float):
+                f.write(f"vt {uv[0]:.6f} {uv[1]:.6f}\n")
+
+            for fv, fvt in zip(self.faces_v, self.faces_vt):
+                if fvt is not None:
+                    f.write("f " + " ".join(f"{vi+1}/{ti+1}" for vi, ti in zip(fv, fvt)) + "\n")
+                else:
+                    f.write("f " + " ".join(f"{vi+1}" for vi in fv) + "\n")
+
+
+
+# ---------------------------
+# Helpers d'alignement
+# ---------------------------
+def _load_points_any(points_source):
+    """
+    Accepte: chemin CSV (X,Y,Z), pandas.DataFrame(X,Y,Z), ou np.ndarray (N,3).
+    Retourne np.ndarray float (N,3).
+    """
+    try:
+        import pandas as pd  # lazy import
+    except Exception:
+        pd = None
+
+    if isinstance(points_source, (str, Path)):
+        if pd is None:
+            raise ImportError("pandas est requis pour lire un CSV.")
+        df = pd.read_csv(points_source)
+        return df[["X", "Y", "Z"]].to_numpy(dtype=float)
+
+    if pd is not None:
+        try:
+            import pandas as pd  # noqa
+            if isinstance(points_source, pd.DataFrame):
+                return points_source[["X", "Y", "Z"]].to_numpy(dtype=float)
+        except Exception:
+            pass
+
+    arr = np.asarray(points_source, dtype=float)
+    if arr.ndim != 2 or arr.shape[1] != 3:
+        raise ValueError("points_source doit être (N,3) en X,Y,Z.")
+    return arr
+
+
+def _scale_about_center(vertices: np.ndarray, center: np.ndarray, scale_xyz: tuple[float, float, float]):
+    shifted = vertices - center[None, :]
+    scaled = shifted * np.array(scale_xyz, dtype=float)[None, :]
+    return scaled + center[None, :]
+
+
+def _rotate_about_z(vertices: np.ndarray, center: np.ndarray, degrees: float):
+    if abs(degrees) < 1e-12:
+        return vertices
+    theta = np.deg2rad(degrees)
+    c, s = np.cos(theta), np.sin(theta)
+    R = np.array([[c, -s, 0.0],
+                  [s,  c, 0.0],
+                  [0.0, 0.0, 1.0]], dtype=float)
+    return (vertices - center[None, :]) @ R.T + center[None, :]
+
+
+def align_obj_to_points(
+    obj_in: str | Path,
+    points_source,                 # CSV/DataFrame/ndarray (X,Y, Z)
+    out_path: str | Path | None = None,
+    mode: str = "translate",       # "translate" | "translate+scale"
+    scale_axes: str = "xy",        # axes à scaler si mode="translate+scale"
+    lock_z_translation: bool = False,  # True = aligne seulement en XY
+    rotate_z_deg: float = 0.0,     # petite rotation autour de Z si besoin
+) -> dict:
+    """
+    Aligne un .OBJ (repère local) sur des points géoréférencés (X,Y,Z).
+
+    Étapes:
+      1) calcule le centre du mesh et des points
+      2) (option) mise à l'échelle par rapport aux étendues (axes choisis)
+      3) (option) petite rotation autour de Z
+      4) translation pour superposer les centres (XY ou XYZ)
+
+    Retourne un dict: {'offset': (dx,dy,dz), 'scale': (sx,sy,sz), 'rotate_z_deg': ..., 'obj_out': "..."}
+    """
+    obj_in = Path(obj_in)
+    obj = SimpleOBJ.load(obj_in)
+
+    pts = _load_points_any(points_source)
+
+    # Centres
+    mesh_center = np.asarray(obj.vertices, dtype=float).mean(axis=0) if len(obj.vertices) else np.zeros(3)
+    pts_center  = pts.mean(axis=0)
+
+    # Mise à l'échelle grossière (sur étendue)
+    scale = np.array([1.0, 1.0, 1.0], dtype=float)
+    if mode == "translate+scale":
+        m_min, m_max = np.min(obj.vertices, axis=0), np.max(obj.vertices, axis=0)
+        p_min, p_max = np.min(pts, axis=0), np.max(pts, axis=0)
+        m_span = np.maximum(m_max - m_min, 1e-9)
+        p_span = np.maximum(p_max - p_min, 1e-9)
+        if "x" in scale_axes: scale[0] = float(p_span[0] / m_span[0])
+        if "y" in scale_axes: scale[1] = float(p_span[1] / m_span[1])
+        if "z" in scale_axes: scale[2] = float(p_span[2] / m_span[2])
+        obj.vertices = _scale_about_center(np.asarray(obj.vertices, float), mesh_center, tuple(scale))
+
+    # Rotation Z optionnelle (autour du centre AVANT translation)
+    if abs(rotate_z_deg) > 1e-9:
+        obj.vertices = _rotate_about_z(np.asarray(obj.vertices, float), mesh_center, rotate_z_deg)
+
+    # Translation (XY ou XYZ)
+    offset = pts_center - mesh_center
+    if lock_z_translation:
+        offset[2] = 0.0
+    obj.vertices = np.asarray(obj.vertices, float) + offset[None, :]
+
+    # Écriture
+    if out_path is None:
+        out_path = obj_in.with_name(obj_in.stem + "_aligned.obj")
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    obj.save(out_path)
+
+    return {
+        "offset": (float(offset[0]), float(offset[1]), float(offset[2])),
+        "scale": (float(scale[0]), float(scale[1]), float(scale[2])),
+        "rotate_z_deg": float(rotate_z_deg),
+        "obj_out": str(out_path),
+    }
