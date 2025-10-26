@@ -4,6 +4,7 @@
 <p align="center">
   <img src="docs/media/interpolated_3d_volume.png" alt="GeoRad3D — 3D interpolation and mesh painting example" width="80%">
 </p>
+<p align="center"><em>Figure — Example of 3D kriging and colorized geological mesh (GeoRad3D).</em></p>
 
 ---
 
