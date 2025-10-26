@@ -2,8 +2,14 @@
 .env/
 __pycache__/
 .ipynb_checkpoints/
-.DS_Store
 
+# --- OS / IDE files ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# --- Data folders ---
 data/raw/*
 data/processed/*
 data/meshes/*
@@ -11,14 +17,13 @@ data/meshes/*
 !data/processed/README.md
 !data/meshes/README.md
 
+# --- Outputs & generated files ---
 outputs/
+
+# --- File types to ignore ---
 *.npz
 *.npy
 *.log
 *.png
 *.csv
 *.json
-
-.vscode/
-.idea/
-Thumbs.db

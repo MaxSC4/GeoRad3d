@@ -10,6 +10,7 @@ from pathlib import Path
 import json
 import numpy as np
 import pandas as pd
+import sys
 
 from utils.animation import save_zslice_gif
 
@@ -61,8 +62,48 @@ def cmd_fit(args: argparse.Namespace) -> None:
     x, y, z, r = df["X"].values, df["Y"].values, df["Z"].values, df["R"].values
     log.info(f"{len(df)} points chargés depuis {args.csv}")
 
-    # BBox + grille
-    bx, by, bz = bbox_from_points(x, y, z, pad_frac=args.pad)
+    # BBox + grille -------------------------------------------------------
+    log.info("Détermination de la bounding box...")
+
+    # --fit-domain : "points" (par défaut), "mesh", "union"
+    domain = getattr(args, "fit_domain", "points")
+
+    if domain not in {"points", "mesh", "union"}:
+        raise ValueError(f"--fit-domain must be 'points', 'mesh', or 'union', not '{domain}'")
+
+    if domain == "points":
+        bx, by, bz = bbox_from_points(x, y, z, pad_frac=args.pad)
+
+    elif domain in {"mesh", "union"}:
+        from utils.obj_io import SimpleOBJ
+        obj_path = getattr(args, "obj", None)
+        if not obj_path:
+            log.error("You selected --fit-domain mesh/union but did not provide --obj.")
+            sys.exit(1)
+        mesh = SimpleOBJ.load(obj_path)
+        mv = mesh.vertices
+        mx = (float(mv[:, 0].min()), float(mv[:, 0].max()))
+        my = (float(mv[:, 1].min()), float(mv[:, 1].max()))
+        mz = (float(mv[:, 2].min()), float(mv[:, 2].max()))
+
+        if domain == "mesh":
+            bx, by, bz = mx, my, mz
+        else:  # union
+            bx = (min(x.min(), mx[0]), max(x.max(), mx[1]))
+            by = (min(y.min(), my[0]), max(y.max(), my[1]))
+            bz = (min(z.min(), mz[0]), max(z.max(), mz[1]))
+
+        # optional pad
+        pad_x = (bx[1] - bx[0]) * args.pad
+        pad_y = (by[1] - by[0]) * args.pad
+        pad_z = (bz[1] - bz[0]) * args.pad
+        bx = (bx[0] - pad_x, bx[1] + pad_x)
+        by = (by[0] - pad_y, by[1] + pad_y)
+        bz = (bz[0] - pad_z, bz[1] + pad_z)
+
+    log.info(f"Bounding box selected ({domain}): X={bx}, Y={by}, Z={bz}")
+
+    # Grille 3D régulière
     xs, ys, zs = regular_grid(bx, by, bz, nx=args.nx, ny=args.ny, nz=args.nz)
     log.info(f"Grille : nx={len(xs)}, ny={len(ys)}, nz={len(zs)}")
 
@@ -202,6 +243,9 @@ def build_parser() -> argparse.ArgumentParser:
     pf.add_argument("--variogram", default="spherical", choices=["spherical", "exponential", "gaussian", "linear"])
     pf.add_argument("--preview", action="store_true", help="Ouvrir une visu rapide après le fit (si dispo)")
     pf.add_argument("--skip-cv", action="store_true", help="saute la cross-validation LOO")
+    pf.add_argument("--fit-domain", default="points", choices=["points", "mesh", "union"], help="Define bounding box from 'points', 'mesh', or their 'union'")
+    pf.add_argument("--obj", default=None, help="Optional OBJ file for --fit-domain mesh/union")
+
     pf.set_defaults(func=cmd_fit)
 
     # view

@@ -27,10 +27,24 @@ python main.py fit [options]
 | `--variogram` | str | `"spherical"` | Variogram model (`spherical`, `exponential`, `gaussian`, `linear`) |
 | `--preview` | flag |  | Open a quick visualization after fitting |
 | `--skip-cv` | flag |  | Skip cross-validation (faster) |
+| `--fit-domain` | str | `"points"` | Defines which geometry determines the interpolation domain:<br>• `points` → bounding box of measurement points<br>• `mesh` → bounding box of an OBJ mesh<br>• `union` → combined bounding box of both |
+| `--obj` | str | `None` | Path to OBJ mesh used for `--fit-domain mesh` or `--fit-domain union` |
 
-### Example
+### Examples
+
+#### 1️⃣ Interpolation using only point data
 ```
 python main.py fit --csv data/raw/points.csv --nx 80 --ny 80 --nz 50 --variogram gaussian --skip-cv
+```
+
+#### 2️⃣ Interpolation domain based on OBJ mesh
+```
+python main.py fit --csv data/raw/points.csv --fit-domain mesh --obj data/meshes/model_georef.obj --nx 100 --ny 100 --nz 60 --skip-cv
+```
+
+#### 3️⃣ Interpolation domain based on the **union** of mesh and points (recommended)
+```
+python main.py fit --csv data/raw/points.csv --fit-domain union --obj data/meshes/model_georef.obj --nx 120 --ny 120 --nz 60 --skip-cv
 ```
 
 ---
