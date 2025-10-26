@@ -1,0 +1,14 @@
+name: georad3d
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - numpy
+  - scipy
+  - matplotlib
+  - pykrige
+  - pillow
+  - trimesh
+  - mplcursors
+  - scikit-image
+  - jupyterlab
