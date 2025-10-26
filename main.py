@@ -11,6 +11,8 @@ import json
 import numpy as np
 import pandas as pd
 
+from utils.animation import save_zslice_gif
+
 # Logger (fallback simple si utils.logger absent)
 try:
     from utils.logger import get_logger
@@ -148,6 +150,35 @@ def cmd_paint(args: argparse.Namespace) -> None:
     )
     log.info(f"Peinture terminée : {res}")
 
+def cmd_gif(args):
+    vol_path = VOL_DIR / "volume.npz"
+    if not vol_path.exists():
+        log.error(f"Volume introuvable : {vol_path} — lance d'abord `fit`.")
+        return
+    data = np.load(vol_path)
+    xs, ys, zs, est = data["xs"], data["ys"], data["zs"], data["est"]
+
+    df = None
+    if args.csv and Path(args.csv).exists():
+        df = load_points_csv(args.csv)
+
+    out = Path(args.out or (FIG_DIR / "z_sweep.gif"))
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    path = save_zslice_gif(
+        xs, ys, zs, est,
+        out_path=out,
+        points_df=df,
+        vmin=args.vmin, vmax=args.vmax,
+        cmap=args.cmap,
+        upsample_factor=args.upsample,
+        gaussian_sigma=args.sigma,
+        skip=args.skip,
+        fps=args.fps,
+        dpi=args.dpi,
+        title="GeoRad3D — Z sweep"
+    )
+    log.info(f"GIF écrit : {path}")
 
 # ---------- Parser CLI -------------------------------------------------------
 
@@ -188,6 +219,19 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("--tex-h", type=int, default=2048, help="Hauteur texture")
     pp.add_argument("--no-nan-color", action="store_true", help="Ne pas recolorer les NaN (sommets hors volume)")
     pp.set_defaults(func=cmd_paint)
+
+    pg = sub.add_parser("gif", help="Générer un GIF des coupes 2D sur Z")
+    pg.add_argument("--csv", default=str(DATA / "raw" / "points.csv"), help="Points (pour superposer les mesures)")
+    pg.add_argument("--out", default=str(FIG_DIR / "z_sweep.gif"))
+    pg.add_argument("--cmap", default="viridis")
+    pg.add_argument("--vmin", type=float, default=None)
+    pg.add_argument("--vmax", type=float, default=None)
+    pg.add_argument("--upsample", type=float, default=2.0, help="Upsample factor (>=1.0)")
+    pg.add_argument("--sigma", type=float, default=0.8, help="Gaussian blur")
+    pg.add_argument("--skip", type=int, default=1, help="Stride sur Z (1=toutes les tranches)")
+    pg.add_argument("--fps", type=int, default=10)
+    pg.add_argument("--dpi", type=int, default=120)
+    pg.set_defaults(func=cmd_gif)
 
     return p
 

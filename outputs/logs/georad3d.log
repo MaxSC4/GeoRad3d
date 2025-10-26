@@ -16,3 +16,5 @@
 2025-10-26 15:21:58,632 [INFO] main: Krigeage 3D (variogram='spherical')…
 2025-10-26 15:22:42,444 [INFO] main: Volume sauvegardé : /Users/msc/Documents/WORK/2025-2026/GEOPS/georad3d/outputs/volumes/volume.npz
 2025-10-26 15:22:42,450 [INFO] main: Cross-validation SKIPPED (à la demande).
+2025-10-26 15:45:09,652 [INFO] main: GIF écrit : outputs/figures/z_sweep.gif
+2025-10-26 15:48:27,602 [INFO] main: GIF écrit : outputs/figures/z_sweep.gif
