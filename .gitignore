@@ -24,6 +24,5 @@ outputs/
 *.npz
 *.npy
 *.log
-*.png
 *.csv
 *.json
