@@ -54,12 +54,30 @@ The resulting models can be explored interactively, exported, and compared with 
    - **2D depth slices** linked to a slider for exploring different Z-levels.
    - Gaussian smoothing and percentile-based color scaling for perceptual readability.
 
+   *(see [CLI – `view`](docs/cli.md#command-view) for command usage)*
+
 5. **Integration with 3D Meshes**  
    - Ability to load external `.obj` geological models (with `.mtl` if available).
    - “Painting” of the mesh surface according to interpolated radioactivity values:
      - **Vertex coloring** (RGB per vertex)
      - or **Texture baking** (UV → PNG + updated MTL).
    - The resulting mesh can be directly visualized in any 3D viewer or GIS.
+
+   *(see [CLI – `paint`](docs/cli.md#command-paint))*
+
+---
+
+## 📘 Documentation
+
+For a detailed guide on how to use the GeoRad3D command-line interface (CLI),  
+see the [**CLI Documentation**](docs/cli.md).
+
+This includes explanations and usage examples for:
+- **3D interpolation (`fit`)**
+- **Volume visualization (`view`)**
+- **Mesh painting (`paint`)**
+- **Z-slice animation (`gif`)**
+- *(soon)* **Model alignment (`align-obj`)**
 
 ---
 
