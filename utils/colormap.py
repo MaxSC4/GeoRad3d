@@ -32,18 +32,24 @@ def values_to_rgb(
         Bornes réellement utilisées pour le mapping.
     """
     vals = np.asarray(vals, dtype=float)
+    finite_vals = vals[np.isfinite(vals)]
+    if finite_vals.size == 0:
+        raise ValueError("Aucune valeur finie fournie pour le mapping de couleurs.")
 
     # Détermination automatique des bornes
     if vmin is None:
-        vmin = np.nanpercentile(vals, 2)
+        vmin = float(np.percentile(finite_vals, 2))
     if vmax is None:
-        vmax = np.nanpercentile(vals, 98)
+        vmax = float(np.percentile(finite_vals, 98))
+    if np.isclose(vmax, vmin):
+        vmax = vmin + 1e-6  # évite division par zéro
 
     # Échelle normalisée entre 0 et 1
     if clip:
         vals = np.clip(vals, vmin, vmax)
 
     normed = (vals - vmin) / (vmax - vmin + 1e-12)
+    normed = np.nan_to_num(normed, nan=0.0, posinf=1.0, neginf=0.0, copy=False)
     cmap = cm.get_cmap(cmap_name)
 
     # Conversion RGBA → RGB [0..255]

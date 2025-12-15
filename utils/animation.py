@@ -3,7 +3,6 @@
 # -------------------------------------------------------
 from __future__ import annotations
 from pathlib import Path
-import io
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.ndimage import gaussian_filter, zoom
@@ -48,12 +47,24 @@ def save_zslice_gif(
     out_path = str(Path(out_path))
     V = _ensure_xyz_order(xs, ys, zs, volume)
 
-    finite_vals = V[np.isfinite(V)]
+    finite_mask = np.isfinite(V)
+    finite_vals = V[finite_mask]
+    if finite_vals.size == 0:
+        raise ValueError("Impossible de créer un GIF : volume sans valeurs finies.")
     if vmin is None:
         vmin = float(np.percentile(finite_vals, 2))
     if vmax is None:
         vmax = float(np.percentile(finite_vals, 98))
 
+    def _prep_slice(slice_xy: np.ndarray) -> np.ndarray:
+        arr = slice_xy
+        if upsample_factor and upsample_factor != 1.0:
+            arr = zoom(arr, upsample_factor, order=1)
+        if gaussian_sigma and gaussian_sigma > 0:
+            arr = gaussian_filter(arr, sigma=gaussian_sigma)
+        return arr
+
+    extent = (float(xs.min()), float(xs.max()), float(ys.min()), float(ys.max()))
     fig = plt.figure(figsize=(6.5, 7), dpi=dpi)
     gs = fig.add_gridspec(2, 1, height_ratios=[14, 1])
     ax = fig.add_subplot(gs[0])
@@ -62,16 +73,12 @@ def save_zslice_gif(
     fig.suptitle(title, fontsize=12)
 
     k0 = 0
-    img2d = V[:, :, k0].T
-    if upsample_factor and upsample_factor != 1.0:
-        img2d = zoom(img2d, upsample_factor, order=1)
-    if gaussian_sigma and gaussian_sigma > 0:
-        img2d = gaussian_filter(img2d, sigma=gaussian_sigma)
+    img2d = _prep_slice(V[:, :, k0].T)
 
     im = ax.imshow(
         img2d,
         origin="lower",
-        extent=(xs.min(), xs.max(), ys.min(), ys.max()),
+        extent=extent,
         vmin=vmin, vmax=vmax, cmap=cmap, aspect="equal"
     )
     cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
@@ -88,36 +95,34 @@ def save_zslice_gif(
     ax.set_title(f"Z = {zs[k0]:.2f}  (index {k0})")
 
     # --- Faux slider ---
-    ax_slider.set_xlim(0, len(zs) - 1)
-    ax_slider.set_ylim(0, 1)
-    ax_slider.axis("off")
-    # ligne de fond
-    ax_slider.plot([0, len(zs) - 1], [0.5, 0.5], color="lightgray", lw=4, alpha=0.7, solid_capstyle="round")
-    # curseur mobile
-    cursor_line, = ax_slider.plot([k0], [0.5], "o", color="tab:blue", markersize=8)
+    cursor_line = None
+    if show_slider:
+        ax_slider.set_xlim(0, len(zs) - 1)
+        ax_slider.set_ylim(0, 1)
+        ax_slider.axis("off")
+        ax_slider.plot(  # ligne de fond
+            [0, len(zs) - 1], [0.5, 0.5],
+            color="lightgray", lw=4, alpha=0.7, solid_capstyle="round"
+        )
+        cursor_line, = ax_slider.plot([k0], [0.5], "o", color="tab:blue", markersize=8)
+    else:
+        ax_slider.axis("off")
 
-    # Conversion figure → image
-    def _fig_to_pil() -> Image.Image:
-        buf = io.BytesIO()
+    def _capture_frame() -> Image.Image:
+        """Transforme la figure en image RGB sans passer par un disque/BytesIO."""
         fig.canvas.draw()
-        fig.savefig(buf, format="png", bbox_inches="tight", dpi=dpi)
-        buf.seek(0)
-        img = Image.open(buf).convert("RGB")
-        buf.close()
-        return img
+        buf = np.asarray(fig.canvas.buffer_rgba())
+        return Image.fromarray(buf, mode="RGBA").convert("RGB")
 
     frames: list[Image.Image] = []
-    frames.append(_fig_to_pil())
+    frames.append(_capture_frame())
 
     # Boucle animation
-    for k in range(0, V.shape[2], max(1, int(skip))):
+    step = max(1, int(skip))
+    for k in range(0, V.shape[2], step):
         if k == k0:
             continue
-        sl = V[:, :, k].T
-        if upsample_factor and upsample_factor != 1.0:
-            sl = zoom(sl, upsample_factor, order=1)
-        if gaussian_sigma and gaussian_sigma > 0:
-            sl = gaussian_filter(sl, sigma=gaussian_sigma)
+        sl = _prep_slice(V[:, :, k].T)
 
         im.set_data(sl)
         ax.set_title(f"Z = {zs[k]:.2f}  (index {k})")
@@ -125,7 +130,7 @@ def save_zslice_gif(
         if show_slider:
             cursor_line.set_xdata([k])
 
-        frames.append(_fig_to_pil())
+        frames.append(_capture_frame())
 
     plt.close(fig)
 

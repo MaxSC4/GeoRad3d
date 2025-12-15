@@ -193,27 +193,6 @@ def _warn_if_far(ax, xs, ys, zs, mesh):
                   transform=ax.transAxes,color="red",
                   bbox=dict(fc="w",ec="none",alpha=0.8))
 
-def _mesh_edges_segments3d(mesh, max_edges=80000):
-    F = np.asarray(mesh.faces, dtype=int)
-    V = np.asarray(mesh.vertices, dtype=float)
-    if F.size == 0:
-        return np.empty((0, 2, 3), float)
-
-    # Arêtes uniques
-    E = np.vstack([F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]])
-    E.sort(axis=1)
-    E = np.unique(E, axis=0)
-
-    # Sous-échantillonnage si trop d'arêtes
-    if len(E) > max_edges:
-        idx = np.linspace(0, len(E) - 1, num=max_edges, endpoint=True, dtype=int)
-        idx = np.unique(idx)  # sécurité
-        E = E[idx]
-
-    segs = np.stack([V[E[:, 0]], V[E[:, 1]]], axis=1)  # (n,2,3)
-    return segs
-
-
 def _add_mesh_wire3d(ax3d, mesh, color="#aaaaaa", alpha=0.8, lw=0.5, max_edges=80000):
     """
     Ajoute un wireframe léger sous forme de Line3DCollection.

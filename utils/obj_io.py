@@ -195,13 +195,8 @@ def _load_points_any(points_source):
         df = pd.read_csv(points_source)
         return df[["X", "Y", "Z"]].to_numpy(dtype=float)
 
-    if pd is not None:
-        try:
-            import pandas as pd  # noqa
-            if isinstance(points_source, pd.DataFrame):
-                return points_source[["X", "Y", "Z"]].to_numpy(dtype=float)
-        except Exception:
-            pass
+    if pd is not None and isinstance(points_source, pd.DataFrame):
+        return points_source[["X", "Y", "Z"]].to_numpy(dtype=float)
 
     arr = np.asarray(points_source, dtype=float)
     if arr.ndim != 2 or arr.shape[1] != 3:

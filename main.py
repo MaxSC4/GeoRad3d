@@ -125,7 +125,12 @@ def cmd_fit(args: argparse.Namespace) -> None:
     # Cross-validation LOO (optionnelle)
     if not args.skip_cv:
         log.info("Cross-validation Leave-One-Out…")
-        cv = loo_metrics(np.c_[x, y, z], r, variogram_model=args.variogram, variogram_parameters=None)
+        cv = loo_metrics(
+            np.c_[x, y, z], r,
+            variogram_model=args.variogram,
+            variogram_parameters=None,
+            n_jobs=args.cv_jobs,
+        )
         metrics = {k: cv[k] for k in ["ME", "RMSE", "MSSE", "VSE"]}
         pd.Series(metrics).to_csv(OUT / "validation_metrics.csv")
         (OUT / "validation_metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
@@ -245,6 +250,7 @@ def build_parser() -> argparse.ArgumentParser:
     pf.add_argument("--skip-cv", action="store_true", help="saute la cross-validation LOO")
     pf.add_argument("--fit-domain", default="points", choices=["points", "mesh", "union"], help="Define bounding box from 'points', 'mesh', or their 'union'")
     pf.add_argument("--obj", default=None, help="Optional OBJ file for --fit-domain mesh/union")
+    pf.add_argument("--cv-jobs", type=int, default=-1, help="Nombre de jobs parallèles pour la CV (-1 = auto)")
 
     pf.set_defaults(func=cmd_fit)
 

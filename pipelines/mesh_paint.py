@@ -98,14 +98,14 @@ def paint_obj_with_volume(
     # 2) Échantillonnage du volume aux sommets
     sampler = ScalarFieldSampler(xs, ys, zs, volume)
     vals = sampler.sample_xyz(obj.vertices)  # (N,)
-    n_nan = int(np.isnan(vals).sum())
+    nan_mask = np.isnan(vals)
+    n_nan = int(nan_mask.sum())
     logger.info(f"Échantillonnage terminé. Sommets hors grille (NaN) : {n_nan}/{n_verts}")
 
     # 3) Mapping valeurs -> RGB
     rgb, (used_vmin, used_vmax) = values_to_rgb(vals, cmap_name=cmap_name, vmin=vmin, vmax=vmax)
     if n_nan > 0 and nan_color is not None:
-        mask_nan = np.isnan(vals)
-        rgb[mask_nan] = np.array(nan_color, dtype=np.uint8)
+        rgb[nan_mask] = np.array(nan_color, dtype=np.uint8)
 
     # 4) Sauvegarde OBJ vertex-colored
     obj_out_path = out_dir / f"{obj_in.stem}_painted.obj"
