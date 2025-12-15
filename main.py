@@ -29,6 +29,7 @@ from utils.load import load_points_csv
 from utils.bounding import bbox_from_points
 from utils.grid import regular_grid
 from models.interpolation import krige_volume
+from models.strata import load_strata_file, sample_strata_points
 from validation.crossval import loo_metrics
 from pipelines.mesh_paint import paint_obj_with_volume
 
@@ -102,6 +103,32 @@ def cmd_fit(args: argparse.Namespace) -> None:
         bz = (bz[0] - pad_z, bz[1] + pad_z)
 
     log.info(f"Bounding box selected ({domain}): X={bx}, Y={by}, Z={bz}")
+    bbox = (bx, by, bz)
+
+    xyz = np.c_[x, y, z]
+    fit_xyz = xyz
+    fit_vals = r
+
+    # Strates optionnelles (conditions initiales)
+    if args.strata:
+        try:
+            strata_defs = load_strata_file(args.strata)
+        except Exception as exc:
+            log.error(f"Impossible de charger les strates '{args.strata}': {exc}")
+            sys.exit(1)
+        points_strata, values_strata = sample_strata_points(
+            strata_defs,
+            bbox=bbox,
+            global_spacing=args.strata_spacing,
+        )
+        if len(points_strata):
+            fit_xyz = np.vstack([fit_xyz, points_strata])
+            fit_vals = np.concatenate([fit_vals, values_strata])
+            log.info(
+                f"{len(strata_defs)} strate(s) ajoutée(s) → {len(points_strata)} pseudo-points"
+            )
+        else:
+            log.warning("Fichier de strates chargé mais aucune coordonnée valide n'a été générée.")
 
     # Grille 3D régulière
     xs, ys, zs = regular_grid(bx, by, bz, nx=args.nx, ny=args.ny, nz=args.nz)
@@ -111,7 +138,7 @@ def cmd_fit(args: argparse.Namespace) -> None:
     log.info(f"Krigeage 3D (variogram='{args.variogram}')…")
     est, var = krige_volume(
         xs, ys, zs,
-        np.c_[x, y, z], r,
+        fit_xyz, fit_vals,
         variogram_model=args.variogram,
         variogram_parameters=None,
         enable_plotting=False
@@ -126,7 +153,7 @@ def cmd_fit(args: argparse.Namespace) -> None:
     if not args.skip_cv:
         log.info("Cross-validation Leave-One-Out…")
         cv = loo_metrics(
-            np.c_[x, y, z], r,
+            xyz, r,
             variogram_model=args.variogram,
             variogram_parameters=None,
             n_jobs=args.cv_jobs,
@@ -251,6 +278,8 @@ def build_parser() -> argparse.ArgumentParser:
     pf.add_argument("--fit-domain", default="points", choices=["points", "mesh", "union"], help="Define bounding box from 'points', 'mesh', or their 'union'")
     pf.add_argument("--obj", default=None, help="Optional OBJ file for --fit-domain mesh/union")
     pf.add_argument("--cv-jobs", type=int, default=-1, help="Nombre de jobs parallèles pour la CV (-1 = auto)")
+    pf.add_argument("--strata", default=None, help="JSON décrivant des strates inclinées (conditions initiales)")
+    pf.add_argument("--strata-spacing", type=float, default=None, help="Pas global (m) pour discrétiser les strates")
 
     pf.set_defaults(func=cmd_fit)
 

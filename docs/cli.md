@@ -29,6 +29,8 @@ python main.py fit [options]
 | `--skip-cv` | flag |  | Skip cross-validation (faster) |
 | `--fit-domain` | str | `"points"` | Defines which geometry determines the interpolation domain:<br>• `points` → bounding box of measurement points<br>• `mesh` → bounding box of an OBJ mesh<br>• `union` → combined bounding box of both |
 | `--obj` | str | `None` | Path to OBJ mesh used for `--fit-domain mesh` or `--fit-domain union` |
+| `--strata` | str | `None` | Path to a JSON file describing dipping strata used as initial constraints (see below) |
+| `--strata-spacing` | float | auto | Global spacing (meters) used to discretize the strata planes |
 
 ### Examples
 
@@ -46,6 +48,28 @@ python main.py fit --csv data/raw/points.csv --fit-domain mesh --obj data/meshes
 ```
 python main.py fit --csv data/raw/points.csv --fit-domain union --obj data/meshes/model_georef.obj --nx 120 --ny 120 --nz 60 --skip-cv
 ```
+
+#### 4️⃣ Adding dipping strata as initial conditions
+```
+python main.py fit --csv data/raw/points.csv --strata data/priors/strata_dip.json --strata-spacing 12
+```
+The JSON file should contain a list of strata definitions:
+```json
+{
+  "strata": [
+    {
+      "name": "Layer A",
+      "origin": [430120.0, 4823150.0, 320.0],
+      "dip_deg": 18,
+      "azimuth_deg": 95,
+      "thickness": 6.0,
+      "spacing": 10.0,
+      "value": 175.0
+    }
+  ]
+}
+```
+Each stratum generates pseudo-measurements along an inclined plane (plus optional thickness), steering the kriging solution toward the expected diffusion pattern.
 
 ---
 
